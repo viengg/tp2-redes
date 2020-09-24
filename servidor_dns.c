@@ -28,7 +28,7 @@ typedef struct {
 } ServerEntry;
 
 void usage(int argc, char **argv) {
-    printf("usage: %s <server port>\n", argv[0]);
+    printf("usage: %s <server port> [startup]\n", argv[0]);
     printf("example: %s 51511\n", argv[0]);
     exit(EXIT_FAILURE);
 }
@@ -48,18 +48,18 @@ void att_table(HostTable *hosts, char *hostname, char *ip) {
         if (strcmp(hosts->table[i][0], "") == 0) {
             strcpy(hosts->table[i][0], hostname);
             strcpy(hosts->table[i][1], ip);
-            printf("entrada adicionada!\n");
+            printf("[add] entrada adicionada: host: %s ip: %s\n", hosts->table[i][0], hosts->table[i][1]);
             return;
         }
         // hostname ja existe na tabela
         else if (strcmp(hosts->table[i][0], hostname) == 0) {
             strcpy(hosts->table[i][0], hostname);
             strcpy(hosts->table[i][1], ip);
-            printf("entrada atualizada!\n");
+            printf("[add] entrada atualizada: host: %s ip: %s\n", hosts->table[i][0], hosts->table[i][1]);
             return;
         }
     }
-    printf("lista de hosnames/ip cheia");
+    printf("[add] lista de hosnames/ip cheia");
 }
 
 // retorna indice na tabela de hosts se achar ou -1 se nao achar
@@ -95,7 +95,7 @@ void *wait_for_responses(void *d) {
         memset(ip, 0, BUFSZ);
 
         size_t count = recvfrom(s, buf, BUFSZ, 0, caddr, &caddrlen);
-        printf("requisiçao recebida\n");
+        printf("[recv] requisiçao recebida\n");
         size_t hostname_size = count - 1;
         memcpy(hostname, (buf + 1), hostname_size);
         hostname[hostname_size] = '\0';
@@ -124,7 +124,7 @@ void listen_for_responses(int socket, HostTable *hosts) {
 }
 
 // seta todas as entradas do vetor de servidores como nulo
-void init_server_list(ServerEntry servers[MAXSERVERS]) {
+void init_server_list(ServerEntry *servers) {
     for (int i = 0; i < MAXSERVERS; i++) {
         servers[i].valid = 0;
     }
@@ -136,17 +136,17 @@ void link_server(ServerEntry *servers, char *ipaddr, char *port) {
         // entrada vazia na lista
         if (servers[i].valid == 0) {
             if (0 != addrparse(ipaddr, port, &(servers[i].storage))) {
-                printf("erro linkagem\n");
+                printf("[link] erro linkagem\n");
             }
             servers[i].valid = 1;
 
             char addrstr[BUFSZ];
             addrtostr((struct sockaddr *)&(servers[i].storage), addrstr, BUFSZ);
-            printf("conectado a %s\n", addrstr);
+            printf("[link] conectado a %s\n", addrstr);
             return;
         }
     }
-    printf("lista de servidores cheia\n");
+    printf("[link] lista de servidores cheia\n");
 }
 
 // procura o ip de hostname na lista de servidores utilizando o socket usado
@@ -167,7 +167,7 @@ void search_in_servers(int socket, ServerEntry *servers, char *hostname,
                                 (struct sockaddr *)&(servers[i].storage), len);
             char addrstr[BUFSZ];
             addrtostr((struct sockaddr *)&(servers[i].storage), addrstr, BUFSZ);
-            printf("requisiçao enviada para %s: %ld bytes enviados\n", addrstr,
+            printf("[send] requisiçao enviada para %s: %ld bytes enviados\n", addrstr,
                    bytes_sent);
 
             char buf[BUFSZ];
@@ -190,9 +190,11 @@ void search_in_servers(int socket, ServerEntry *servers, char *hostname,
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
+    if (argc != 2 && argc != 3) {
         usage(argc, argv);
     }
+
+    FILE *fd = (argc == 2) ? stdin : fopen(argv[2], "r");
 
     struct sockaddr_storage storage;
     char *proto = "v6";
@@ -229,23 +231,26 @@ int main(int argc, char **argv) {
     listen_for_responses(s, &hosts);
 
     while (1) {
-        scanf("%s", args[0]);
+       if(fscanf(fd, "%s", args[0]) != 1){
+           exit(EXIT_SUCCESS);
+       }
 
         if (strcmp(args[0], "add") == 0) {
-            scanf("%s", args[1]);
-            scanf("%s", args[2]);
+            fscanf(fd, "%s", args[1]);
+            fscanf(fd, "%s", args[2]);
             att_table(&hosts, args[1], args[2]);
 
         } else if (strcmp(args[0], "search") == 0) {
-            scanf("%s", args[1]);
+            fscanf(fd, "%s", args[1]);
             
             int index = search_hostname(hosts, args[1]);
             // achou o ip localmente
-            if (index > 0) {
-                printf("endereço de ip de %s: %s\n", args[1],
+            if (index >= 0) {
+                printf("[search] endereço de ip de %s: %s\n", args[1],
                        hosts.table[index][1]);
-            } else {
-                printf("nao achou localmente\n");
+            //existe pelo menos um servidor conectado
+            } else if (servers[0].valid){
+                printf("[search] nao achou o endereço de %s localmente\n", args[1]);
 
                 char ip[BUFSZ];
                 int socket_req = socket(storage.ss_family, SOCK_DGRAM, 0);
@@ -253,16 +258,23 @@ int main(int argc, char **argv) {
                 close(socket_req);
 
                 if (strcmp(ip, "-1") == 0) {
-                    printf("nao achou nos servidores linkados\n");
+                    printf("[search] nao achou o endereço de %s nos servidores linkados\n", args[1]);
                 } else {
-                    printf("endereço de ip de %s: %s\n", args[1], ip);
+                    printf("[search] endereço de ip de %s: %s\n", args[1], ip);
                 }
+            }
+            else{
+                printf("[search] nao achou o endereço de %s localmente\n", args[1]);
+                printf("[search] nao existem servidores para pesquisar\n");
             }
             
         } else if (strcmp(args[0], "link") == 0) {
-            scanf("%s", args[1]);
-            scanf("%s", args[2]);
+            fscanf(fd, "%s", args[1]);
+            fscanf(fd, "%s", args[2]);
             link_server(servers, args[1], args[2]);
+        }
+        else {
+            printf("comando nao reconhecido\n");
         }
     }
 
