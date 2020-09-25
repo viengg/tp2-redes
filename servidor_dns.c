@@ -18,8 +18,8 @@ typedef struct {
 } HostTable;
 
 struct dns_data {
-    int socket;
     HostTable *hosts;
+    char port[BUFSZ];
 };
 
 typedef struct {
@@ -76,10 +76,34 @@ int search_hostname(HostTable hosts, char *hostname) {
 
 // entra em loop para recebimento e resposta de requisiçoes de outros servidores
 // dns
-void *wait_for_responses(void *d) {
+void *start_server(void *d) {
     struct dns_data *data = (struct dns_data *)d;
-    int s = data->socket;
     HostTable *hosts = data->hosts;
+    char *port = data->port;
+
+    struct sockaddr_storage storage;
+    char *proto = "v6";
+    server_sockaddr_init(proto, port, &storage);
+
+    int s;
+    s = socket(storage.ss_family, SOCK_DGRAM, 0);
+    if (s == -1) {
+        logexit("socket");
+    }
+
+    int enable = 1;
+    if (0 != setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int))) {
+        logexit("setsockopt");
+    }
+
+    struct sockaddr *addr = (struct sockaddr *)(&storage);
+    if (0 != bind(s, addr, sizeof(storage))) {
+        logexit("bind");
+    }
+
+    char addrstr[BUFSZ];
+    addrtostr(addr, addrstr, BUFSZ);
+    printf("bound to %s, waiting connections\n", addrstr);
 
     char buf[BUFSZ];
     char hostname[BUFSZ];
@@ -115,12 +139,12 @@ void *wait_for_responses(void *d) {
 }
 
 // cria thread separada para tratar da comunicaçao com outros servidores
-void listen_for_responses(int socket, HostTable *hosts) {
+void listen_for_responses(char *port, HostTable *hosts) {
     pthread_t tid;
     struct dns_data data;
-    data.socket = socket;
+    strcpy(data.port, port);
     data.hosts = hosts;
-    pthread_create(&tid, NULL, wait_for_responses, (void *)&data);
+    pthread_create(&tid, NULL, start_server, (void *)&data);
 }
 
 // seta todas as entradas do vetor de servidores como nulo
@@ -152,7 +176,7 @@ void link_server(ServerEntry *servers, char *ipaddr, char *port) {
 // procura o ip de hostname na lista de servidores utilizando o socket usado
 // como parametro se achar o hostname, copia seu ip para dst, caso contrario
 // copia "-1"
-void search_in_servers(int socket, ServerEntry *servers, char *hostname,
+void search_in_servers(ServerEntry *servers, char *hostname,
                        char *dst) {
     strcpy(dst, "-1");
     size_t msg_size = 1 + strlen(hostname);
@@ -162,8 +186,9 @@ void search_in_servers(int socket, ServerEntry *servers, char *hostname,
     
     for (int i = 0; i < MAXSERVERS; i++) {
         if (servers[i].valid) {
+            int s = socket(servers[i].storage.ss_family, SOCK_DGRAM, 0);
             socklen_t len = sizeof(servers[i].storage);
-            size_t bytes_sent = sendto(socket, msg, msg_size, 0,
+            size_t bytes_sent = sendto(s, msg, msg_size, 0,
                                 (struct sockaddr *)&(servers[i].storage), len);
             char addrstr[BUFSZ];
             addrtostr((struct sockaddr *)&(servers[i].storage), addrstr, BUFSZ);
@@ -171,7 +196,7 @@ void search_in_servers(int socket, ServerEntry *servers, char *hostname,
                    bytes_sent);
 
             char buf[BUFSZ];
-            size_t count = recvfrom(socket, buf, BUFSZ, 0,
+            size_t count = recvfrom(s, buf, BUFSZ, 0,
                             (struct sockaddr *)&(servers[i].storage), &len);
             size_t ip_size = count - 1;
             memcpy(dst, buf + 1, ip_size);
@@ -179,6 +204,7 @@ void search_in_servers(int socket, ServerEntry *servers, char *hostname,
 
             // achou um ip valido
             if (strcmp(dst, "-1") != 0) {
+                close(s);
                 return;
             }
         }
@@ -196,43 +222,18 @@ int main(int argc, char **argv) {
 
     FILE *fd = (argc == 2) ? stdin : fopen(argv[2], "r");
 
-    struct sockaddr_storage storage;
-    char *proto = "v6";
-    if (0 != server_sockaddr_init(proto, argv[1], &storage)) {
-        usage(argc, argv);
-    }
-
-    int s;
-    s = socket(storage.ss_family, SOCK_DGRAM, 0);
-    if (s == -1) {
-        logexit("socket");
-    }
-
-    int enable = 1;
-    if (0 != setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int))) {
-        logexit("setsockopt");
-    }
-
-    struct sockaddr *addr = (struct sockaddr *)(&storage);
-    if (0 != bind(s, addr, sizeof(storage))) {
-        logexit("bind");
-    }
-
-    char addrstr[BUFSZ];
-    addrtostr(addr, addrstr, BUFSZ);
-    printf("bound to %s, waiting connections\n", addrstr);
-
     HostTable hosts;
     init_table(&hosts);
     ServerEntry servers[MAXSERVERS];
     init_server_list(servers);
     char args[3][BUFSZ];
 
-    listen_for_responses(s, &hosts);
+    listen_for_responses(argv[1], &hosts);
 
     while (1) {
        if(fscanf(fd, "%s", args[0]) != 1){
-           exit(EXIT_SUCCESS);
+           fd = stdin;
+           continue;
        }
 
         if (strcmp(args[0], "add") == 0) {
@@ -253,9 +254,7 @@ int main(int argc, char **argv) {
                 printf("[search] nao achou o endereço de %s localmente\n", args[1]);
 
                 char ip[BUFSZ];
-                int socket_req = socket(storage.ss_family, SOCK_DGRAM, 0);
-                search_in_servers(socket_req, servers, args[1], ip);
-                close(socket_req);
+                search_in_servers(servers, args[1], ip);
 
                 if (strcmp(ip, "-1") == 0) {
                     printf("[search] nao achou o endereço de %s nos servidores linkados\n", args[1]);
