@@ -232,6 +232,7 @@ int main(int argc, char **argv) {
 
     while (1) {
        if(fscanf(fd, "%s", args[0]) != 1){
+           fclose(fd);
            fd = stdin;
            continue;
        }
