@@ -17,15 +17,16 @@ typedef struct {
     char table[MAXHOSTS][2][BUFSZ];
 } HostTable;
 
-struct dns_data {
-    HostTable *hosts;
-    char port[BUFSZ];
-};
-
 typedef struct {
     struct sockaddr_storage storage;
     int valid;
 } ServerEntry;
+
+struct dns_data {
+    HostTable *hosts;
+    ServerEntry *server_list;
+    char port[BUFSZ];
+};
 
 void usage(int argc, char **argv) {
     printf("usage: %s <server port> [startup]\n", argv[0]);
@@ -74,12 +75,55 @@ int search_hostname(HostTable hosts, char *hostname) {
     return res;
 }
 
+// procura o ip de hostname na lista de servidores utilizando o socket usado
+// como parametro se achar o hostname, copia seu ip para dst, caso contrario
+// copia "-1"
+void search_in_servers(ServerEntry *servers, char *hostname,
+                       char *dst) {
+    strcpy(dst, "-1");
+    size_t msg_size = 1 + strlen(hostname);
+    char msg[msg_size];
+    msg[0] = 1;
+    memcpy(msg + 1, hostname, msg_size - 1);
+    
+    for (int i = 0; i < MAXSERVERS; i++) {
+        if (servers[i].valid) {
+            int s = socket(servers[i].storage.ss_family, SOCK_DGRAM, 0);
+            socklen_t len = sizeof(servers[i].storage);
+            size_t bytes_sent = sendto(s, msg, msg_size, 0,
+                                (struct sockaddr *)&(servers[i].storage), len);
+            char addrstr[BUFSZ];
+            addrtostr((struct sockaddr *)&(servers[i].storage), addrstr, BUFSZ);
+            printf("[send] requisiçao enviada para %s: %ld bytes enviados\n", addrstr,
+                   bytes_sent);
+
+            char buf[BUFSZ];
+            size_t count = recvfrom(s, buf, BUFSZ, 0,
+                            (struct sockaddr *)&(servers[i].storage), &len);
+            size_t ip_size = count - 1;
+            memcpy(dst, buf + 1, ip_size);
+            dst[ip_size] = '\0';
+
+            // achou um ip valido
+            if (strcmp(dst, "-1") != 0) {
+                close(s);
+                return;
+            }
+        }
+        // chegou no fim da lista de servidores linkados
+        else {
+            return;
+        }
+    }
+}
+
 // entra em loop para recebimento e resposta de requisiçoes de outros servidores
 // dns
 void *start_server(void *d) {
     struct dns_data *data = (struct dns_data *)d;
     HostTable *hosts = data->hosts;
     char *port = data->port;
+    ServerEntry *servers = data->server_list;
 
     struct sockaddr_storage storage;
     char *proto = "v6";
@@ -126,7 +170,7 @@ void *start_server(void *d) {
 
         int index = search_hostname(*hosts, hostname);
         if (index == -1) {
-            strcpy(ip, "-1");
+            search_in_servers(servers, hostname, ip);
         } else {
             strcpy(ip, hosts->table[index][1]);
         }
@@ -139,11 +183,12 @@ void *start_server(void *d) {
 }
 
 // cria thread separada para tratar da comunicaçao com outros servidores
-void listen_for_responses(char *port, HostTable *hosts) {
+void listen_for_responses(char *port, HostTable *hosts, ServerEntry *server_list) {
     pthread_t tid;
     struct dns_data data;
     strcpy(data.port, port);
     data.hosts = hosts;
+    data.server_list = server_list;
     pthread_create(&tid, NULL, start_server, (void *)&data);
 }
 
@@ -173,48 +218,6 @@ void link_server(ServerEntry *servers, char *ipaddr, char *port) {
     printf("[link] lista de servidores cheia\n");
 }
 
-// procura o ip de hostname na lista de servidores utilizando o socket usado
-// como parametro se achar o hostname, copia seu ip para dst, caso contrario
-// copia "-1"
-void search_in_servers(ServerEntry *servers, char *hostname,
-                       char *dst) {
-    strcpy(dst, "-1");
-    size_t msg_size = 1 + strlen(hostname);
-    char msg[msg_size];
-    msg[0] = 1;
-    memcpy(msg + 1, hostname, msg_size - 1);
-    
-    for (int i = 0; i < MAXSERVERS; i++) {
-        if (servers[i].valid) {
-            int s = socket(servers[i].storage.ss_family, SOCK_DGRAM, 0);
-            socklen_t len = sizeof(servers[i].storage);
-            size_t bytes_sent = sendto(s, msg, msg_size, 0,
-                                (struct sockaddr *)&(servers[i].storage), len);
-            char addrstr[BUFSZ];
-            addrtostr((struct sockaddr *)&(servers[i].storage), addrstr, BUFSZ);
-            printf("[send] requisiçao enviada para %s: %ld bytes enviados\n", addrstr,
-                   bytes_sent);
-
-            char buf[BUFSZ];
-            size_t count = recvfrom(s, buf, BUFSZ, 0,
-                            (struct sockaddr *)&(servers[i].storage), &len);
-            size_t ip_size = count - 1;
-            memcpy(dst, buf + 1, ip_size);
-            dst[ip_size] = '\0';
-
-            // achou um ip valido
-            if (strcmp(dst, "-1") != 0) {
-                close(s);
-                return;
-            }
-        }
-        // chegou no fim da lista de servidores linkados
-        else {
-            return;
-        }
-    }
-}
-
 int main(int argc, char **argv) {
     if (argc != 2 && argc != 3) {
         usage(argc, argv);
@@ -228,7 +231,7 @@ int main(int argc, char **argv) {
     init_server_list(servers);
     char args[3][BUFSZ];
 
-    listen_for_responses(argv[1], &hosts);
+    listen_for_responses(argv[1], &hosts, servers);
 
     while (1) {
        if(fscanf(fd, "%s", args[0]) != 1){
